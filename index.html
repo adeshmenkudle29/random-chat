@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Omegle Clone - Video & Text</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen p-4 flex flex-col items-center justify-center font-sans">
+
+  <div class="w-full max-w-5xl bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-2xl flex flex-col gap-4">
+    
+    <!-- Controls Bar -->
+    <header class="flex justify-between items-center bg-slate-950 p-3 rounded-xl border border-slate-800">
+      <div class="flex items-center gap-3">
+        <span class="text-xl font-bold text-indigo-400">RandomCam</span>
+        <span id="statusBadge" class="text-xs px-2.5 py-1 rounded-full bg-slate-800 text-slate-400 font-medium">Idle</span>
+      </div>
+      <div class="flex gap-2">
+        <button id="nextBtn" class="bg-rose-600 hover:bg-rose-500 disabled:opacity-40 px-4 py-2 rounded-lg font-medium text-sm transition" disabled>
+          Next Stranger (Esc)
+        </button>
+        <button id="startBtn" class="bg-indigo-600 hover:bg-indigo-500 px-5 py-2 rounded-lg font-medium text-sm transition">
+          Start
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace (Video + Chat Grid) -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 h-[550px]">
+      
+      <!-- Video Section (2/3 width) -->
+      <div class="lg:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3 h-full">
+        <!-- Local User Video -->
+        <div class="bg-black rounded-xl overflow-hidden relative border border-slate-800 flex items-center justify-center">
+          <video id="localVideo" autoplay muted playsinline class="w-full h-full object-cover"></video>
+          <span class="absolute bottom-2 left-2 bg-black/70 backdrop-blur-sm px-2.5 py-1 rounded text-xs">You</span>
+        </div>
+        <!-- Remote Stranger Video -->
+        <div class="bg-black rounded-xl overflow-hidden relative border border-slate-800 flex items-center justify-center">
+          <video id="remoteVideo" autoplay playsinline class="w-full h-full object-cover"></video>
+          <span class="absolute bottom-2 left-2 bg-black/70 backdrop-blur-sm px-2.5 py-1 rounded text-xs">Stranger</span>
+        </div>
+      </div>
+
+      <!-- Text Chatbox (1/3 width) -->
+      <div class="bg-slate-950 border border-slate-800 rounded-xl flex flex-col h-full overflow-hidden">
+        <!-- Message Feed -->
+        <div id="messagesBox" class="flex-1 p-4 overflow-y-auto space-y-2 text-sm">
+          <div class="text-slate-500 text-xs text-center my-2">Welcome! Press Start to meet someone.</div>
+        </div>
+
+        <!-- Chat Input Form -->
+        <form id="chatForm" class="p-2 border-t border-slate-800 flex gap-2 bg-slate-900/50">
+          <input 
+            id="msgInput" 
+            type="text" 
+            placeholder="Type a message..." 
+            disabled 
+            class="flex-1 bg-slate-950 border border-slate-700 px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50 text-white"
+          />
+          <button 
+            type="submit" 
+            id="sendBtn" 
+            disabled 
+            class="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 px-4 py-2 rounded-lg font-medium text-sm transition">
+            Send
+          </button>
+        </form>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    const socket = io();
+
+    let localStream;
+    let peerConnection;
+    let currentRoom = null;
+
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideo = document.getElementById('remoteVideo');
+    const startBtn = document.getElementById('startBtn');
+    const nextBtn = document.getElementById('nextBtn');
+    const statusBadge = document.getElementById('statusBadge');
+    
+    const messagesBox = document.getElementById('messagesBox');
+    const chatForm = document.getElementById('chatForm');
+    const msgInput = document.getElementById('msgInput');
+    const sendBtn = document.getElementById('sendBtn');
+
+    const rtcConfig = {
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    };
+
+    // Helper: System Messages
+    function addSystemMessage(text) {
+      const msg = document.createElement('div');
+      msg.className = 'text-xs text-center text-slate-500 my-1 italic';
+      msg.textContent = text;
+      messagesBox.appendChild(msg);
+      messagesBox.scrollTop = messagesBox.scrollHeight;
+    }
+
+    // Helper: User/Stranger Messages
+    function addChatMessage(sender, text, isSelf) {
+      const wrapper = document.createElement('div');
+      wrapper.className = `flex flex-col ${isSelf ? 'items-end' : 'items-start'}`;
+
+      const bubble = document.createElement('div');
+      bubble.className = `px-3 py-2 rounded-xl max-w-[80%] break-words text-sm ${
+        isSelf ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-slate-800 text-slate-200 rounded-bl-none'
+      }`;
+      bubble.textContent = text;
+
+      const label = document.createElement('span');
+      label.className = 'text-[10px] text-slate-500 mb-0.5';
+      label.textContent = isSelf ? 'You' : 'Stranger';
+
+      wrapper.appendChild(label);
+      wrapper.appendChild(bubble);
+      messagesBox.appendChild(wrapper);
+      messagesBox.scrollTop = messagesBox.scrollHeight;
+    }
+
+    // Enable/Disable chat inputs
+    function toggleChat(enable) {
+      msgInput.disabled = !enable;
+      sendBtn.disabled = !enable;
+      if (enable) msgInput.focus();
+    }
+
+    // Reset current WebRTC and Room state
+    function cleanupSession() {
+      if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+      }
+      if (remoteVideo.srcObject) {
+        remoteVideo.srcObject.getTracks().forEach(t => t.stop());
+        remoteVideo.srcObject = null;
+      }
+      currentRoom = null;
+      toggleChat(false);
+      nextBtn.disabled = true;
+    }
+
+    // 1. Initialize Camera and Microphone
+    async function initMedia() {
+      if (!localStream) {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        localVideo.srcObject = localStream;
+      }
+    }
+
+    // 2. Start / Search
+    async function startSearch() {
+      cleanupSession();
+      await initMedia();
+      statusBadge.textContent = 'Searching...';
+      statusBadge.className = 'text-xs px-2.5 py-1 rounded-full bg-amber-950 text-amber-400 font-medium';
+      addSystemMessage('Looking for someone you can chat with...');
+      startBtn.classList.add('hidden');
+      nextBtn.disabled = false;
+      socket.emit('find-match');
+    }
+
+    startBtn.onclick = startSearch;
+
+    // 3. Skip / Next Button Click
+    nextBtn.onclick = () => {
+      socket.emit('leave-match');
+      addSystemMessage('You disconnected.');
+      startSearch();
+    };
+
+    // Hotkey: Press ESC to skip
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !nextBtn.disabled) {
+        nextBtn.click();
+      }
+    });
+
+    // 4. Socket Events: Waiting & Matched
+    socket.on('waiting', () => {
+      statusBadge.textContent = 'Waiting for stranger...';
+    });
+
+    socket.on('matched', async ({ roomID, initiator }) => {
+      currentRoom = roomID;
+      statusBadge.textContent = 'Connected';
+      statusBadge.className = 'text-xs px-2.5 py-1 rounded-full bg-emerald-950 text-emerald-400 font-medium';
+      
+      addSystemMessage("You're now chatting with a random stranger. Say hi!");
+      toggleChat(true);
+
+      peerConnection = new RTCPeerConnection(rtcConfig);
+
+      // Add camera/mic tracks to Peer Connection
+      localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+      // Handle Remote Stream
+      peerConnection.ontrack = (e) => {
+        remoteVideo.srcObject = e.streams[0];
+      };
+
+      // Handle ICE Candidates
+      peerConnection.onicecandidate = (e) => {
+        if (e.candidate) {
+          socket.emit('signal', { roomID: currentRoom, data: { candidate: event.candidate } });
+        }
+      };
+
+      // Initiator creates Offer
+      if (initiator) {
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        socket.emit('signal', { roomID: currentRoom, data: { sdp: offer } });
+      }
+    });
+
+    // 5. WebRTC Signals
+    socket.on('signal', async (data) => {
+      if (!peerConnection) return;
+
+      if (data.sdp) {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        if (data.sdp.type === 'offer') {
+          const answer = await peerConnection.createAnswer();
+          await peerConnection.setLocalDescription(answer);
+          socket.emit('signal', { roomID: currentRoom, data: { sdp: answer } });
+        }
+      } else if (data.candidate) {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+      }
+    });
+
+    // 6. Messaging Handlers
+    chatForm.onsubmit = (e) => {
+      e.preventDefault();
+      const text = msgInput.value.trim();
+      if (text && currentRoom) {
+        socket.emit('send-message', { roomID: currentRoom, text });
+        addChatMessage('You', text, true);
+        msgInput.value = '';
+      }
+    };
+
+    socket.on('receive-message', ({ text }) => {
+      addChatMessage('Stranger', text, false);
+    });
+
+    // 7. Stranger Disconnected Handler
+    socket.on('stranger-disconnected', () => {
+      addSystemMessage('Stranger has disconnected.');
+      statusBadge.textContent = 'Disconnected';
+      statusBadge.className = 'text-xs px-2.5 py-1 rounded-full bg-rose-950 text-rose-400 font-medium';
+      cleanupSession();
+      startBtn.classList.remove('hidden');
+      startBtn.textContent = 'New Match';
+    });
+  </script>
+</body>
+</html>
