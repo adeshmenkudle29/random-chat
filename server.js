@@ -1,20 +1,25 @@
-// server.js
 const express = require('express');
 const http = require('http');
+const path = require('path');
 const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
-app.use(express.static('public'));
+// Serve static files from root directory
+app.use(express.static(__dirname));
+
+// Explicit route to load index.html
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
 
 let waitingUser = null;
 
 io.on('connection', (socket) => {
   // 1. Matchmaking Queue
   socket.on('find-match', () => {
-    // If user is already waiting, don't pair with oneself
     if (waitingUser && waitingUser.id !== socket.id) {
       const roomID = `room_${socket.id}_${waitingUser.id}`;
       socket.join(roomID);
